@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "AutomationML"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "Motynga Sergey", email = "motynga12345@mail.ru" }
+]
+keywords = ["machine-learning", "models", "factory", "sklearn", "automation"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+  "scikit-learn>=1.7.1",
+]
+
+[project.optional-dependencies]
+xgboost   = ["xgboost>=3.0.5"]
+lightgbm  = ["lightgbm>=4.0"]
+catboost  = ["catboost>=1.2"]
+
+all = [
+  "xgboost>=3.0.5",
+  "lightgbm>=4.0",
+  "catboost>=1.2",
+]
+
+dev = [
+  "pytest>=8.4.2",
+  "pytest-cov>=6.3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/SergeyMotynga/AutomationML"
+Repository = "https://github.com/SergeyMotynga/AutomationML"
+Issues = "https://github.com/SergeyMotynga/AutomationML/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["AutomationML*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --cov=AutomationML --cov-report=term-missing --cov-report=xml --cov-fail-under=95"
+filterwarnings = [
+  "ignore:.*is deprecated.*:DeprecationWarning",
+]
