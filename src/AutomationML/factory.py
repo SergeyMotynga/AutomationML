@@ -10,6 +10,8 @@
 лениво при первом создании соответствующей записи реестра.
 
 Соглашения
+
+
 ----------
 — Используются полные имена классов (например, "LinearRegression", "RandomForestClassifier").
 — Гиперпараметры передаются напрямую через create(...); они перекрывают значения из defaults в спецификации.
@@ -55,152 +57,16 @@ import difflib
 import json
 import threading
 
+from .errors import ModelNotFoundError, OptionalDependencyError, TaskMismatchError
+from .utils import (
+    validate_kwargs as _validate_kwargs,
+    normalize_name,
+    stringify_target,
+    json_safe,
+)
 
 EstimatorConstructor = Callable[..., Any]
 ImportPath = str
-
-
-class ModelNotFoundError(KeyError):
-    """Модель с указанным именем отсутствует в реестре."""
-    pass
-
-
-class OptionalDependencyError(ImportError):
-    """Отсутствует требуемый внешний пакет; возникает при попытке создать модель из такого пакета."""
-    pass
-
-
-class TaskMismatchError(ValueError):
-    """Несоответствие типа задачи (классификация/регрессия) ожиданиям вызова."""
-    pass
-
-
-def _normalize_name(name: str) -> str:
-    """
-    Нормализует имя модели для использования в ключах реестра.
-
-    Параметры
-    ---------
-    name : str
-        Произвольная строка имени модели (любой регистр).
-
-    Возвращаемые значения
-    ---------------------
-    str
-        Имя, приведённое к нижнему регистру.
-    """
-    return name.lower()
-
-
-def _validate_kwargs(constructor: EstimatorConstructor, params: Dict[str, Any]) -> Optional[str]:
-    """
-    Проверяет допустимость передаваемых параметров по сигнатуре конструктора.
-
-    Параметры
-    ---------
-    constructor : Callable[..., Any]
-        Конструктор модели (класс или функция-фабрика), для которого выполняется проверка.
-    params : dict[str, Any]
-        Словарь параметров, предполагаемых к передаче в конструктор.
-
-    Возвращаемые значения
-    ---------------------
-    str | None
-        None — если все параметры допустимы или у конструктора есть **kwargs.
-        Строка с описанием ошибок и подсказками — если есть недопустимые параметры.
-
-    Примечания
-    ----------
-    Если сигнатура конструктора недоступна (ошибки inspect.signature), проверка отключается.
-    """
-    try:
-        sig = inspect.signature(constructor)
-    except (TypeError, ValueError):
-        return None
-
-    allowed = set()
-    has_var_kw = False
-    for name, p in sig.parameters.items():
-        if p.kind in (p.POSITIONAL_ONLY, p.VAR_POSITIONAL):
-            continue
-        if p.kind == p.VAR_KEYWORD:
-            has_var_kw = True
-        else:
-            allowed.add(name)
-
-    if has_var_kw:
-        return None
-
-    invalid = [k for k in params.keys() if k not in allowed]
-    if not invalid:
-        return None
-
-    suggestions: Dict[str, List[str]] = {}
-    for k in invalid:
-        close = difflib.get_close_matches(k, sorted(allowed), n=3, cutoff=0.6)
-        if close:
-            suggestions[k] = close
-
-    parts = [f"Недопустимые параметры: {', '.join(sorted(invalid))}."]
-    if suggestions:
-        hint_lines = [f"  - {k}: возможно, имелось в виду: {', '.join(v)}" for k, v in suggestions.items()]
-        parts.append("Подсказки по возможным опечаткам:\n" + "\n".join(hint_lines))
-    parts.append(f"Допустимые параметры: {', '.join(sorted(allowed)) or '—'}.")
-    return "\n".join(parts)
-
-
-def _stringify_target(target: Any) -> Optional[str]:
-    """
-    Преобразует callable-объект к строковому импортируемому пути, если это возможно.
-
-    Параметры
-    ---------
-    target : Any
-        Объект, который может быть строкой (импортируемый путь) или любым вызываемым объектом.
-
-    Возвращаемые значения
-    ---------------------
-    str | None
-        Строка вида "module.qualname", если объект можно импортировать по этому пути.
-        None, если объект не сериализуем (например, лямбда, вложенная функция).
-    """
-    if isinstance(target, str):
-        return target
-    module = getattr(target, "__module__", None)
-    qualname = getattr(target, "__qualname__", None)
-    if not module or not qualname or "<locals>" in qualname:
-        return None
-    try:
-        mod = importlib.import_module(module)
-        obj = mod
-        for part in qualname.split("."):
-            obj = getattr(obj, part)
-        if obj is target:
-            return f"{module}.{qualname}"
-    except Exception:
-        return None
-    return None
-
-
-def _json_safe(value: Any) -> Any:
-    """
-    Преобразует произвольное значение к виду, безопасному для JSON-сериализации.
-
-    Параметры
-    ---------
-    value : Any
-        Любое значение из defaults спецификации.
-
-    Возвращаемые значения
-    ---------------------
-    Any
-        Исходное значение, если оно сериализуемо JSON; иначе строка вида repr(value).
-    """
-    try:
-        json.dumps(value)
-        return value
-    except TypeError:
-        return repr(value)
 
 
 @dataclass
@@ -323,7 +189,7 @@ class ModelFactory:
         bool
             True, если запись существует; иначе False.
         """
-        key = _normalize_name(model_name)
+        key = normalize_name(model_name)
         with self._lock:
             return key in self._registry
 
@@ -377,7 +243,7 @@ class ModelFactory:
         if task not in (None, "clf", "reg"):
             raise ValueError("Недопустимое значение 'task'. Ожидается: None, 'clf' или 'reg'.")
 
-        key = _normalize_name(model_name)
+        key = normalize_name(model_name)
         with self._lock:
             if (key in self._builtin_names) and (not overwrite) and (not _internal):
                 raise ModelNotFoundError(
@@ -424,7 +290,7 @@ class ModelFactory:
         ValueError
             Попытка удалить встроенную запись без force=True.
         """
-        key = _normalize_name(model_name)
+        key = normalize_name(model_name)
         with self._lock:
             if key not in self._registry:
                 raise ModelNotFoundError(f"Невозможно удалить: модель '{model_name}' не найдена.")
@@ -473,7 +339,7 @@ class ModelFactory:
         ModelNotFoundError
             Модель не найдена; сообщение включает подсказки ближайших совпадений.
         """
-        key = _normalize_name(model_name)
+        key = normalize_name(model_name)
         with self._lock:
             item = self._registry.get(key)
             if item is not None:
@@ -633,11 +499,11 @@ class ModelFactory:
             for key, (canon, spec) in self._registry.items():
                 if (key in self._builtin_names) and (not include_builtins):
                     continue
-                s_target = _stringify_target(spec.target)
+                s_target = stringify_target(spec.target)
                 if s_target is None:
                     skipped.append(canon)
                     continue
-                safe_defaults = {k: _json_safe(v) for k, v in spec.defaults.items()}
+                safe_defaults = {k: json_safe(v) for k, v in spec.defaults.items()}
                 items.append({
                     "model_name": canon,
                     "target": s_target,
@@ -690,23 +556,6 @@ class ModelFactory:
     def dump(self, *, include_builtins: bool = False, strict: bool = False) -> str:
         """
         Короткий синоним dump_registry_json().
-
-        Параметры
-        ---------
-        include_builtins : bool, по умолчанию False
-            Включать ли встроенные записи.
-        strict : bool, по умолчанию False
-            Требовать сериализацию всех записей.
-
-        Возвращаемые значения
-        ---------------------
-        str
-            JSON-представление реестра.
-
-        Исключения
-        ----------
-        ValueError
-            В режиме strict=True присутствуют записи, которые нельзя сериализовать.
         """
         return self.dump_registry_json(include_builtins=include_builtins, strict=strict)
 
