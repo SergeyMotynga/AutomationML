@@ -209,3 +209,103 @@ factory2.load_registry_file("automationml_registry.json", eager_validate=True)
 ### Безопасность
 
 Загрузка реестра ведёт к импортам модулей по строковым путям. Не загружать реестры из непроверенных источников.
+
+---
+---
+
+## Конструктор пайплайнов (`AutomationML.pipeline`)
+
+Единый интерфейс для сборки `sklearn`/`imblearn`-совместимого `Pipeline` по декларативной спецификации шагов без ручных импортов. Возвращаемый объект — готовый `Pipeline`, который можно использовать напрямую через `.fit()`/`.predict()`.
+
+### Ключевые идеи
+
+* **Шаги по умолчанию**: `scaler → sampler → model`. Дополнительно можно добавлять свои шаги через `extra_steps`.
+* **Формат спецификации шага**:
+  - экземпляр (например, `StandardScaler()`),
+  - класс/фабрика (`StandardScaler`),
+  - строковый путь (`"sklearn.preprocessing.StandardScaler"`),
+  - словарь `{ "obj": <spec>, "params": {...} }`.
+* **Алиасы семплеров**: `"undersample"` (RandomUnderSampler), `"smote"` (SMOTE), `"combine"` (SMOTEENN).
+* **Автоподстановка `random_state`**: добавляется в шаги препроцессинга и семплинга, если они поддерживают параметр.
+* **Валидация параметров**: проверка по сигнатуре конструктора, с подсказками при опечатках.
+* Если в пайплайне есть `sampler` → возвращается `imblearn.Pipeline`, иначе — `sklearn.Pipeline`.
+
+---
+
+### Быстрый старт
+
+```python
+from AutomationML.pipeline import PipelineBuilder
+
+pb = PipelineBuilder(
+    model="sklearn.linear_model.LogisticRegression",
+    scaler=True,                # StandardScaler
+    sample=True,                # включает шаг семплинга
+    sampler="undersample",      # алиас на RandomUnderSampler
+    sampling_strategy=0.3,
+)
+pipe = pb.build()
+pipe.fit(X_train, y_train)
+y_pred = pipe.predict(X_test)
+```
+
+---
+
+### Продвинутый пример
+
+```python
+from sklearn.preprocessing import StandardScaler
+from AutomationML.pipeline import PipelineBuilder
+
+pb = PipelineBuilder(
+    model="sklearn.ensemble.RandomForestClassifier",
+    scaler=StandardScaler(with_mean=False),
+    sampler={"alias": "smote", "params": {"k_neighbors": 5, "sampling_strategy": 0.5}},
+    extra_steps=[
+        {"name": "selector", "obj": "sklearn.feature_selection.SelectKBest", "params": {"k": 20}},
+    ],
+)
+pipe = pb.build()
+```
+
+---
+
+### Поддерживаемые шаги
+
+В `PipelineBuilder` явно предусмотрены три основных шага:
+
+* **scaler** — масштабирование признаков (`StandardScaler`, `MinMaxScaler`, и др.).
+* **sampler** — балансировка классов (`RandomUnderSampler`, `SMOTE`, `SMOTEENN`).
+* **model** — обязательный финальный шаг (классификатор или регрессор).
+
+Кроме того, через параметр **extra_steps** можно добавить в конвейер любые дополнительные шаги препроцессинга или трансформации. Это могут быть:
+
+* **encoder** — кодирование категориальных признаков (`OneHotEncoder`, `OrdinalEncoder`, target encoding).
+* **imputer** — обработка пропусков (`SimpleImputer`, `KNNImputer`, `IterativeImputer`).
+* **feature_selector** — отбор признаков (`SelectKBest`, `VarianceThreshold`, `SelectFromModel`, `RFE`).
+* **feature_generator** — генерация новых признаков (`PolynomialFeatures`, взаимодействия признаков).
+* **dim_reduction** — понижение размерности (`PCA`, `TruncatedSVD`, `UMAP`).
+* и любые другие совместимые со sklearn трансформеры.
+
+Таким образом, базовый конструктор остаётся простым, но при этом гибко расширяется за счёт `extra_steps`.
+
+---
+
+### Дополнительно
+
+* Доступ к шагам через `pipe.named_steps`.
+* Поддержка `set_params`/`get_params` для всех шагов.
+* Для sampler требуется установленный пакет `imbalanced-learn`.
+
+---
+
+### Опциональные зависимости
+
+* Для пайплайна: `imbalanced-learn` (только при использовании sampler).
+* Для моделей: `xgboost`, `lightgbm`, `catboost` (при необходимости).
+
+---
+
+### Безопасность
+
+Сборка пайплайнов по строковым путям приводит к импортам модулей. Не используйте спецификации из непроверенных источников.
