@@ -32,11 +32,13 @@ dependencies = [
 xgboost   = ["xgboost>=3.0.5"]
 lightgbm  = ["lightgbm>=4.0"]
 catboost  = ["catboost>=1.2"]
+sampler   = ["imbalanced-learn>=0.12,<0.14"]
 
 all = [
   "xgboost>=3.0.5",
   "lightgbm>=4.0",
   "catboost>=1.2",
+  "imbalanced-learn>=0.12,<0.14",
 ]
 
 dev = [
