@@ -1,8 +1,10 @@
 import sys
+import types
 import builtins
 import pytest
 
 from AutomationML.pipeline import PipelineBuilder
+from AutomationML.errors import OptionalDependencyError
 
 
 class DummyTransformer:
@@ -445,15 +447,67 @@ def test_signature_failure_path_no_injection(monkeypatch):
     assert not hasattr(scaler, "random_state") or getattr(scaler, "random_state", None) is None
 
 
-def test_build_with_sampler_monkeypatched(monkeypatch):
-    import types
-    from AutomationML.pipeline import PipelineBuilder
+class _FakeSampler:
+    def __init__(self, sampling_strategy=None, random_state=None, n_jobs=None):
+        self.sampling_strategy = sampling_strategy
+        self.random_state = random_state
+        self.n_jobs = n_jobs
 
-    fake_pipeline_called = {}
+def _fake_import_from_path(_path: str):
+    # независимо от переданного пути возвращаем наш класс семплера
+    return _FakeSampler
 
-    # подменяем модуль imblearn.pipeline
-    fake_module = types.SimpleNamespace(Pipeline=lambda steps: ("fake", steps))
-    monkeypatch.setitem(sys.modules, "imblearn.pipeline", fake_module)
+
+def test_imbpipeline_success_branch_without_real_imblearn(monkeypatch):
+    """
+    Покрываем ветку:
+        from imblearn.pipeline import Pipeline as ImbPipeline
+        return ImbPipeline(steps)
+    (успешный импорт и возврат) — без установки imblearn.
+    """
+    # 1) Подменяем import_from_path в AutomationML.pipeline → не трогаем имblearn.*
+    monkeypatch.setattr("AutomationML.pipeline.import_from_path", _fake_import_from_path, raising=True)
+
+    # 2) Подкладываем модуль imblearn.pipeline с минимальным Pipeline-классом
+    FakeImbPipeline = type("ImbPipeline", (), {
+        "__init__": lambda self, steps: setattr(self, "named_steps", dict(steps))
+    })
+    sys.modules["imblearn.pipeline"] = types.SimpleNamespace(Pipeline=FakeImbPipeline)
+
+    pb = PipelineBuilder(
+        model="sklearn.linear_model.LogisticRegression",
+        scaler=True,
+        sample=True,
+        sampler="undersample",     # alias → _create_sampler → _create_instance → import_from_path (замокан)
+        sampling_strategy=0.3,
+        random_state=123,
+    )
+    pipe = pb.build()  # должно пройти по успешной ветке и вернуть FakeImbPipeline(steps)
+
+    assert "sampler" in pipe.named_steps
+    assert isinstance(pipe.named_steps["sampler"], _FakeSampler)
+
+    # уборка подложенного модуля
+    sys.modules.pop("imblearn.pipeline", None)
+
+
+def test_imbpipeline_missing_module_raises_optional_dependency(monkeypatch):
+    """
+    Покрываем ветку:
+        except ModuleNotFoundError:
+            raise OptionalDependencyError(...)
+    — когда import imblearn.pipeline падает.
+    """
+    # 1) Семплер снова создаём без обращения к реальному imblearn
+    monkeypatch.setattr("AutomationML.pipeline.import_from_path", _fake_import_from_path, raising=True)
+
+    # 2) Ломаем именно импорт 'imblearn.pipeline'
+    real_import = builtins.__import__
+    def fake_import(name, *args, **kwargs):
+        if name == "imblearn.pipeline":
+            raise ModuleNotFoundError("No imblearn")
+        return real_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", fake_import, raising=True)
 
     pb = PipelineBuilder(
         model="sklearn.linear_model.LogisticRegression",
@@ -461,10 +515,5 @@ def test_build_with_sampler_monkeypatched(monkeypatch):
         sample=True,
         sampler="undersample",
     )
-    pipe = pb.build()
-
-    # убедимся, что вызвался именно наш fake pipeline
-    assert isinstance(pipe, tuple)
-    assert pipe[0] == "fake"
-    assert "model" in dict(pipe[1])
-    assert "sampler" in dict(pipe[1])
+    with pytest.raises(OptionalDependencyError):
+        pb.build()
