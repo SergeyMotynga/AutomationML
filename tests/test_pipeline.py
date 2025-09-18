@@ -443,3 +443,28 @@ def test_signature_failure_path_no_injection(monkeypatch):
     scaler = pipe.named_steps["scaler"]
     # так как сигнатура недоступна, автоподстановка не произошла
     assert not hasattr(scaler, "random_state") or getattr(scaler, "random_state", None) is None
+
+
+def test_build_with_sampler_monkeypatched(monkeypatch):
+    import types
+    from AutomationML.pipeline import PipelineBuilder
+
+    fake_pipeline_called = {}
+
+    # подменяем модуль imblearn.pipeline
+    fake_module = types.SimpleNamespace(Pipeline=lambda steps: ("fake", steps))
+    monkeypatch.setitem(sys.modules, "imblearn.pipeline", fake_module)
+
+    pb = PipelineBuilder(
+        model="sklearn.linear_model.LogisticRegression",
+        scaler=True,
+        sample=True,
+        sampler="undersample",
+    )
+    pipe = pb.build()
+
+    # убедимся, что вызвался именно наш fake pipeline
+    assert isinstance(pipe, tuple)
+    assert pipe[0] == "fake"
+    assert "model" in dict(pipe[1])
+    assert "sampler" in dict(pipe[1])
