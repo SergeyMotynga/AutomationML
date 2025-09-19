@@ -15,3 +15,9 @@ class OptionalDependencyError(ImportError, AutomationMLError):
 
 class TaskMismatchError(ValueError, AutomationMLError):
     """Несоответствие типа задачи (классификация/регрессия)."""
+
+class UnknownSearchMethodError(ValueError):
+    """Неизвестный метод поиска гиперпараметров."""
+
+class InvalidSearchSpaceError(ValueError):
+    """Некорректное или неподдерживаемое пространство гиперпараметров для выбранного метода."""
