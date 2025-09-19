@@ -270,3 +270,39 @@ def test_space_to_random_distributions_inverted_bounds_step_raises():
         U.space_to_random_distributions({"depth": ("int", 9, 3, {"step": 3})})
     with pytest.raises(InvalidSearchSpaceError):
         U.space_to_random_distributions({"alpha": ("float", 1.0, 0.0, {"step": 0.1})})
+
+
+def test_space_to_grid_float_right_edge_append():
+    # шаг не делит интервал нацело → правая граница должна быть добавлена
+    grid = U.space_to_grid({"x": ("float", 0.0, 0.25, {"step": 0.1})})
+    assert grid["x"][-1] == 0.25
+
+
+def test_space_to_random_distributions_float_right_edge_append():
+    # со step возвращает дискретный список; последняя точка — high
+    d = U.space_to_random_distributions({"x": ("float", 0.0, 0.25, {"step": 0.1})})
+    assert isinstance(d["x"], list)
+    assert d["x"][-1] == 0.25
+
+
+def test_stringify_target_returns_str_as_is():
+    s = "json.dumps"
+    assert U.stringify_target(s) == s
+
+
+def test_space_to_grid_float_rounding_appends_right_edge():
+    # шаг не делит ровно диапазон → функция должна добавить правую границу
+    grid = U.space_to_grid({"alpha": ("float", 0.0, 0.25, {"step": 0.2})})
+    assert pytest.approx(grid["alpha"]) == [0.0, 0.2, 0.25]
+
+
+def test_space_to_random_distributions_float_rounding_appends_right_edge():
+    dists = U.space_to_random_distributions({"lr": ("float", 0.0, 0.25, {"step": 0.2})})
+    # со step → дискретный список (без SciPy), и также добиваем правую границу
+    assert pytest.approx(dists["lr"]) == [0.0, 0.2, 0.25]
+
+
+def test_space_to_random_distributions_unknown_kind_raises():
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_random_distributions({"weird": ("cat", 0, 1, {"step": 1})})
+        
