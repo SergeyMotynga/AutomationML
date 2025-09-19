@@ -12,6 +12,7 @@ build/
 .coverage
 htmlcov/
 coverage.xml
+reports
 
 # IDE
 .vscode/
