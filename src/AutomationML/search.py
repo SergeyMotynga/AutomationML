@@ -117,11 +117,15 @@ from .errors import OptionalDependencyError  # дополнительные ис
 
 try:  # pragma: no cover
     import optuna as _optuna
-    try:
-        from optuna.integration import OptunaSearchCV as _OptunaSearchCV
-    except Exception:
-        _OptunaSearchCV = None
     _HAS_OPTUNA = True
+    # Новый дом для интеграций (Optuna 3.6+)
+    try:
+        from optuna_integration import OptunaSearchCV as _OptunaSearchCV  # noqa: F401
+    except Exception:
+        try:
+            from optuna.integration import OptunaSearchCV as _OptunaSearchCV  # noqa: F401
+        except Exception:
+            _OptunaSearchCV = None
 except Exception:  # pragma: no cover
     _optuna = None
     _OptunaSearchCV = None
@@ -130,6 +134,104 @@ except Exception:  # pragma: no cover
 
 ParamSpace = Dict[str, Any]
 ScoreArg = Union[str, Callable[[Any, Any], float]]
+
+
+def _space_to_optuna_dists(space: Dict[str, Any]) -> Dict[str, "_optuna.distributions.BaseDistribution"]:
+    """
+    Преобразует DSL-пространство параметров в словарь распределений Optuna,
+    совместимый с OptunaSearchCV (из пакета ``optuna-integration`` или старого
+    ``optuna.integration``).
+
+    Формат входного DSL
+    -------------------
+    Поддерживаются:
+      1) Категории: последовательность примитивов (list/tuple)
+         >>> {"criterion": ["gini", "entropy"]}
+         → CategoricalDistribution(["gini", "entropy"])
+
+      2) Диапазоны: ("int"|"float", low, high, {opts?})
+         - "int": opts {"step": int?, "log": bool?}
+           * если step отсутствует → подставляется 1 (избегаем step=None)
+           → IntDistribution(low, high, step, log)
+         - "float": opts {"step": float|None, "log": bool?}
+           * step может быть None (непрерывное распределение)
+           → FloatDistribution(low, high, step|None, log)
+
+      3) Одиночное значение → категория из одного элемента
+         >>> {"max_depth": 5} → CategoricalDistribution([5])
+
+    Ограничения
+    -----------
+    - callable(trial) в DSL здесь не поддерживается (это только для ручного режима
+      ``run_optuna_manual``) — при обнаружении выбрасывается InvalidSearchSpaceError.
+
+    Параметры
+    ---------
+    space : dict[str, Any]
+        Пространство гиперпараметров (категории/диапазоны/константы).
+
+    Возвращает
+    ----------
+    dict[str, optuna.distributions.BaseDistribution]
+        Карта имя_параметра → распределение Optuna.
+
+    Исключения
+    ----------
+    InvalidSearchSpaceError
+        Если встретился callable или неизвестный тип диапазона.
+    """
+    from .errors import InvalidSearchSpaceError
+
+    d: Dict[str, "_optuna.distributions.BaseDistribution"] = {}
+
+    for name, spec in (space or {}).items():
+        # 1) callable — не поддерживается в интеграции
+        if callable(spec):
+            raise InvalidSearchSpaceError(
+                f"Параметр {name!r}: callable не поддерживается в OptunaSearchCV. "
+                f"Используйте ручной режим run_optuna_manual(...)."
+            )
+
+        # 2) Категории
+        if is_primitive_sequence(spec):
+            d[name] = _optuna.distributions.CategoricalDistribution(list(spec))
+            continue
+
+        # 3) Диапазоны: ("int"/"float", low, high, {opts?})
+        if isinstance(spec, tuple) and len(spec) >= 3 and isinstance(spec[0], str):
+            kind = spec[0].lower()
+            low, high = spec[1], spec[2]
+            opts = spec[3] if len(spec) >= 4 and isinstance(spec[3], dict) else {}
+
+            if kind == "int":
+                step = opts.get("step")
+                log = bool(opts.get("log", False))
+                if step is None:
+                    step = 1  # безопасное значение по умолчанию, избегаем step=None
+                d[name] = _optuna.distributions.IntDistribution(
+                    low=int(low), high=int(high), step=int(step), log=log
+                )
+                continue
+
+            if kind == "float":
+                step = opts.get("step")  # может быть None — допустимо
+                log = bool(opts.get("log", False))
+                d[name] = _optuna.distributions.FloatDistribution(
+                    low=float(low),
+                    high=float(high),
+                    step=float(step) if step is not None else None,
+                    log=log,
+                )
+                continue
+
+            raise InvalidSearchSpaceError(
+                f"Параметр {name!r}: неизвестный тип диапазона {kind!r}."
+            )
+
+        # 4) Константа → категория из одного значения
+        d[name] = _optuna.distributions.CategoricalDistribution([spec])
+
+    return d
 
 
 @dataclass
@@ -241,11 +343,19 @@ def gen_objective(
             low, high = spec[1], spec[2]
             opts = spec[3] if len(spec) >= 4 and isinstance(spec[3], dict) else {}
             if kind == "int":
-                return trial.suggest_int(name, int(low), int(high),
-                                         step=opts.get("step"), log=bool(opts.get("log", False)))
+                step = opts.get("step", None)
+                log = bool(opts.get("log", False))
+                if step is None:
+                    return trial.suggest_int(name, int(low), int(high), log=log)
+                else:
+                    return trial.suggest_int(name, int(low), int(high), step=int(step), log=log)
             if kind == "float":
-                return trial.suggest_float(name, float(low), float(high),
-                                           step=opts.get("step"), log=bool(opts.get("log", False)))
+                step = opts.get("step", None)
+                log = bool(opts.get("log", False))
+                if step is None:
+                    return trial.suggest_float(name, float(low), float(high), log=log)
+                else:
+                    return trial.suggest_float(name, float(low), float(high), step=float(step), log=log)
         return spec
 
     def objective(trial: " _optuna.trial.Trial") -> float:
@@ -432,19 +542,19 @@ class SearchFactory:
                 )
 
             if _OptunaSearchCV is not None:
-                # OptunaSearchCV принимает param_distributions; передаём DSL как есть —
-                # интеграция Optuna применит suggest_* при оптимизации.
+                # 1) конвертируем твой DSL → optuna.distributions
+                dists = _space_to_optuna_dists(param_space or {})
+
+                # 2) создаём OptunaSearchCV
                 return _OptunaSearchCV(
                     estimator=est,
-                    param_distributions=(param_space or {}),
+                    param_distributions=dists,
                     cv=cv,
                     scoring=scoring,
                     n_trials=int(n_trials or 50),
                     n_jobs=n_jobs,
                     refit=refit,
                     random_state=eff_rs,
-                    sampler=sampler,
-                    timeout=timeout,
                 )
 
             # Ручной режим: возвращаем конфиг для run_optuna_manual(...)
