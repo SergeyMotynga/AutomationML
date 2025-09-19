@@ -93,7 +93,7 @@ def test_factory_optuna_path_with_integration(monkeypatch):
 
     class DummyOptunaSearchCV:
         def __init__(self, estimator, param_distributions, cv, scoring, n_trials,
-                     n_jobs, refit, random_state, sampler, timeout):
+                     n_jobs, refit, random_state):
             self.estimator = estimator
             self.param_distributions = param_distributions
             self.cv = cv
@@ -102,8 +102,6 @@ def test_factory_optuna_path_with_integration(monkeypatch):
             self.n_jobs = n_jobs
             self.refit = refit
             self.random_state = random_state
-            self.sampler = sampler
-            self.timeout = timeout
             self.best_estimator_ = None
 
         def fit(self, X, y):
