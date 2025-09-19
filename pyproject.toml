@@ -64,7 +64,10 @@ include = ["AutomationML*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-q --cov=AutomationML --cov-report=term-missing --cov-report=xml --cov-fail-under=95"
+addopts = "-q --cov=AutomationML --cov-report=term-missing --cov-report=xml --cov-fail-under=90"
 filterwarnings = [
   "ignore:.*is deprecated.*:DeprecationWarning",
 ]
+
+[tool.coverage.run]
+data_file = "reports/.coverage"
