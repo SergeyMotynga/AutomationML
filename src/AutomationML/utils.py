@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 Motynga Sergey/OMSTU
+# Copyright (c) 2025
 """
 Вспомогательные функции: безопасный импорт по строковому пути и валидация параметров.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Iterable
 import importlib
 import inspect
 import difflib
 import json
 
-from .errors import OptionalDependencyError
+from .errors import OptionalDependencyError, InvalidSearchSpaceError
 
 
 def import_from_path(path: str) -> Any:
@@ -205,3 +205,205 @@ def json_safe(value: Any) -> Any:
         return value
     except TypeError:
         return repr(value)
+
+
+def _is_range_spec(spec: Any) -> bool:
+    """
+    True, если spec — DSL-диапазон: кортеж ( "int"|"float", low, high, [opts] ).
+    """
+    return (
+        isinstance(spec, tuple)
+        and len(spec) >= 3
+        and isinstance(spec[0], str)
+        and spec[0].lower() in {"int", "float"}
+    )
+
+def is_primitive_sequence(value: Any) -> bool:
+    """
+    Проверяет, является ли значение последовательностью примитивов (str|int|float|bool).
+
+    ВАЖНО: DSL-диапазоны вида ("int"|"float", low, high, {opts}) НЕ считаются
+    «примитивной последовательностью», чтобы их корректно обрабатывали space_to_grid/random.
+    """
+    if _is_range_spec(value):
+        return False
+    return isinstance(value, (list, tuple)) and all(isinstance(v, (str, int, float, bool)) for v in value)
+
+
+def space_to_grid(space: Dict[str, Any]) -> Dict[str, Iterable[Any]]:
+    """
+    Преобразует DSL к формату param_grid для GridSearchCV.
+
+    Правила
+    -------
+    — Категориальные параметры: возвращаются как списки значений.
+    — Диапазоны ("int"/"float"): обязателен opts['step'] для дискретизации.
+      Для int формируется range(...). Для float — равномерная сетка с шагом step.
+    — Callable-значения не поддерживаются.
+
+    Исключения
+    ----------
+    InvalidSearchSpaceError
+        Диапазон без шага, некорректные границы/шаг или попытка передать callable.
+    """
+    out: Dict[str, Iterable[Any]] = {}
+    for k, spec in (space or {}).items():
+        if is_primitive_sequence(spec):
+            out[k] = list(spec)
+            continue
+
+        if callable(spec):
+            raise InvalidSearchSpaceError(
+                f"Параметр '{k}' задан как callable и не может быть использован в GridSearchCV."
+            )
+
+        if isinstance(spec, tuple) and len(spec) >= 3 and isinstance(spec[0], str):
+            kind = spec[0].lower()
+            low, high = spec[1], spec[2]
+            opts = spec[3] if len(spec) >= 4 and isinstance(spec[3], dict) else {}
+            step = opts.get("step", None)
+            if step is None:
+                raise InvalidSearchSpaceError(
+                    f"Параметр '{k}' задан как диапазон для GridSearchCV, но не указан 'step'. "
+                    f"Задайте дискретизацию через opts['step'] или используйте метод 'random'/'optuna'."
+                )
+
+            try:
+                if kind == "int":
+                    low_i, high_i, step_i = int(low), int(high), int(step)
+                    if low_i > high_i:
+                        raise InvalidSearchSpaceError(f"Параметр '{k}': low должен быть <= high.")
+                    if step_i <= 0:
+                        raise InvalidSearchSpaceError(f"Параметр '{k}': step должен быть > 0.")
+                    vals = list(range(low_i, high_i + 1, step_i))
+                    if not vals or vals[-1] != high_i:
+                        vals.append(high_i)
+                    out[k] = vals
+
+                elif kind == "float":
+                    low_f, high_f, step_f = float(low), float(high), float(step)
+                    if low_f > high_f:
+                        raise InvalidSearchSpaceError(f"Параметр '{k}': low должен быть <= high.")
+                    if step_f <= 0.0:
+                        raise InvalidSearchSpaceError(f"Параметр '{k}': step должен быть > 0.")
+                    n = max(1, int(round((high_f - low_f) / step_f)))
+                    vals = [low_f + i * step_f for i in range(n + 1)]
+                    if not vals or vals[-1] < high_f - 1e-15:
+                        vals.append(high_f)
+                    out[k] = vals
+
+                else:
+                    raise InvalidSearchSpaceError(
+                        f"Параметр '{k}': неизвестный тип диапазона '{kind}'."
+                    )
+            except (TypeError, ValueError):
+                raise InvalidSearchSpaceError(
+                    f"Параметр '{k}': некорректный step/границы для диапазона."
+                )
+            continue
+
+        out[k] = [spec]
+    return out
+
+
+def space_to_random_distributions(space: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Преобразует DSL к формату param_distributions для RandomizedSearchCV.
+
+    Правила
+    -------
+    — Категориальные → списки.
+    — Диапазоны без step:
+         * int  -> scipy.stats.randint(low, high+1)
+         * float + log=True -> scipy.stats.loguniform(low, high)
+         * float + log=False -> scipy.stats.uniform(low, high-low)
+       Для int c log=True и без step лог-шкала игнорируется (используется randint).
+    — Диапазоны со step → дискретные списки значений.
+    — Callable-значения не поддерживаются.
+
+    Параметры
+    ---------
+    space : dict[str, Any]
+        Пространство параметров в формате DSL.
+
+    Возвращаемые значения
+    ---------------------
+    dict[str, Any]
+        Словарь param_distributions, совместимый с RandomizedSearchCV.
+
+    Исключения
+    ----------
+    OptionalDependencyError
+        Отсутствует scipy.stats при необходимости распределений.
+    InvalidSearchSpaceError
+        Некорректные диапазоны или попытка передать callable.
+    """
+    try:
+        import scipy.stats as st  # локальный импорт, чтобы не трогать глобально зависимости
+    except Exception as e:  # pragma: no cover
+        st = None
+
+    out: Dict[str, Any] = {}
+    for k, spec in (space or {}).items():
+        if is_primitive_sequence(spec):
+            out[k] = list(spec)
+            continue
+        if callable(spec):
+            raise InvalidSearchSpaceError(
+                f"Параметр '{k}' задан как callable и не может быть использован в RandomizedSearchCV."
+            )
+        if isinstance(spec, tuple) and len(spec) >= 3 and isinstance(spec[0], str):
+            kind = spec[0].lower()
+            low, high = spec[1], spec[2]
+            opts = spec[3] if len(spec) >= 4 and isinstance(spec[3], dict) else {}
+            step = opts.get("step", None)
+            log = bool(opts.get("log", False))
+
+            if step is not None:
+                if kind == "int":
+                    low_i, high_i, step_i = int(low), int(high), int(step)
+                    if low_i > high_i:
+                        raise InvalidSearchSpaceError(f"Параметр '{k}': low должен быть <= high.")
+                    if step_i <= 0:
+                        raise InvalidSearchSpaceError(f"Параметр '{k}': step должен быть > 0.")
+                    vals = list(range(low_i, high_i + 1, step_i))
+                    if not vals or vals[-1] != high_i:
+                        vals.append(high_i)
+                    out[k] = vals
+                elif kind == "float":
+                    low_f, high_f, step_f = float(low), float(high), float(step)
+                    if low_f > high_f:
+                        raise InvalidSearchSpaceError(f"Параметр '{k}': low должен быть <= high.")
+                    if step_f <= 0.0:
+                        raise InvalidSearchSpaceError(f"Параметр '{k}': step должен быть > 0.")
+                    n = max(1, int(round((high_f - low_f) / step_f)))
+                    vals = [low_f + i * step_f for i in range(n + 1)]
+                    if not vals or vals[-1] < high_f - 1e-15:
+                        vals.append(high_f)
+                    out[k] = vals
+                else:
+                    raise InvalidSearchSpaceError(f"Параметр '{k}': неизвестный тип диапазона '{kind}'.")
+                continue
+
+            if st is None:
+                raise OptionalDependencyError(
+                    "Для RandomizedSearchCV с непрерывными распределениями требуется 'scipy'. "
+                    "Установите пакет, например: pip install scipy"
+                )
+
+            if kind == "int":
+                out[k] = st.randint(int(low), int(high) + 1)
+            elif kind == "float":
+                if log:
+                    if float(low) <= 0:
+                        raise InvalidSearchSpaceError(
+                            f"Параметр '{k}': для loguniform нижняя граница должна быть > 0."
+                        )
+                    out[k] = st.loguniform(float(low), float(high))
+                else:
+                    out[k] = st.uniform(float(low), float(high) - float(low))
+            else:
+                raise InvalidSearchSpaceError(f"Параметр '{k}': неизвестный тип диапазона '{kind}'.")
+            continue
+        out[k] = [spec]
+    return out
