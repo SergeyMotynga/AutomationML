@@ -1,9 +1,9 @@
 import importlib
 from pathlib import Path
 import pytest
-
+import builtins
 from AutomationML import utils as U
-from AutomationML.errors import OptionalDependencyError
+from AutomationML.errors import OptionalDependencyError, InvalidSearchSpaceError
 
 
 # Топ-левел функция — должна корректно "стрингифицироваться"
@@ -173,3 +173,100 @@ def test_maybe_inject_random_state_signature_failure(monkeypatch):
     original = {"a": 10}
     out = U.maybe_inject_random_state(original, AnyC, 123)
     assert out == original
+
+
+def test_is_primitive_sequence():
+    assert U.is_primitive_sequence([1, 2, 3]) is True
+    assert U.is_primitive_sequence(("a", "b", True, 1.5)) is True
+    assert U.is_primitive_sequence([]) is True
+    assert U.is_primitive_sequence([{"x": 1}]) is False
+    assert U.is_primitive_sequence("abc") is False
+    assert U.is_primitive_sequence(123) is False
+
+
+def test_space_to_grid_requires_step_for_ranges_and_builds_lists():
+    grid = U.space_to_grid({
+        "crit": ["gini", "entropy"],
+        "depth": ("int", 3, 9, {"step": 3}),
+        "alpha": ("float", 0.0, 0.2, {"step": 0.1}),
+        "plain": 5,  # приведётся к [5]
+    })
+    assert grid["crit"] == ["gini", "entropy"]
+    assert grid["depth"] == [3, 6, 9]
+    assert grid["alpha"] == [0.0, 0.1, 0.2]
+    assert grid["plain"] == [5]
+
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_grid({"bad": ("int", 1, 5)})
+
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_grid({"call": lambda t: 1})
+
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_grid({"neg_step": ("float", 0.0, 1.0, {"step": 0})})
+
+
+def test_space_to_random_distributions_with_step_needs_no_scipy_and_handles_callable_error():
+    dists = U.space_to_random_distributions({
+        "n_estimators": ("int", 50, 150, {"step": 50}),   # дискретный список
+        "lr": ("float", 0.01, 0.03, {"step": 0.01}),      # дискретный список
+        "crit": ["gini", "entropy"],                      # категории
+        "plain": 7,                                       # станет [7]
+    })
+    assert dists["n_estimators"] == [50, 100, 150]
+    assert dists["lr"] == [0.01, 0.02, 0.03]
+    assert dists["crit"] == ["gini", "entropy"]
+    assert dists["plain"] == [7]
+
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_random_distributions({"call": lambda t: 1})
+
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_random_distributions({"neg_step": ("int", 1, 5, {"step": 0})})
+
+
+def test_is_primitive_sequence_excludes_range_spec():
+    assert U.is_primitive_sequence(("int", 1, 5)) is False
+    assert U.is_primitive_sequence(("float", 0.0, 1.0, {"step": 0.1})) is False
+    assert U.is_primitive_sequence((1, 2, 3)) is True
+    assert U.is_primitive_sequence(["a", True, 2.0]) is True
+
+
+def test_space_to_grid_raises_on_inverted_bounds():
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_grid({"depth": ("int", 10, 1, {"step": 1})})
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_grid({"alpha": ("float", 1.0, 0.0, {"step": 0.1})})
+
+
+def test_space_to_grid_unknown_kind_raises():
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_grid({"weird": ("cat", 0, 1, {"step": 1})})
+
+
+def test_space_to_random_distributions_loguniform_low_le_zero_raises():
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_random_distributions({"C": ("float", 0.0, 1.0, {"log": True})})
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_random_distributions({"C": ("float", -1.0, 1.0, {"log": True})})
+
+
+def test_space_to_random_distributions_requires_scipy_when_no_step(monkeypatch):
+    # подменяем импорт так, чтобы import scipy.stats падал
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        if name in ("scipy", "scipy.stats"):
+            raise ImportError("no scipy here")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(OptionalDependencyError):
+        U.space_to_random_distributions({"x": ("float", 0.1, 1.0)})  # нет step → нужны распределения scipy
+
+
+def test_space_to_random_distributions_inverted_bounds_step_raises():
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_random_distributions({"depth": ("int", 9, 3, {"step": 3})})
+    with pytest.raises(InvalidSearchSpaceError):
+        U.space_to_random_distributions({"alpha": ("float", 1.0, 0.0, {"step": 0.1})})
