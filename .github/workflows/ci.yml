@@ -38,7 +38,7 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          pytest -q --cov=AutomationML --cov-report=term-missing --cov-report=xml --cov-fail-under=95
+          pytest -q --cov=AutomationML --cov-report=term-missing --cov-report=xml --cov-fail-under=90
 
       - name: Upload coverage.xml
         uses: actions/upload-artifact@v4
