@@ -309,3 +309,221 @@ pipe = pb.build()
 ### Безопасность
 
 Сборка пайплайнов по строковым путям приводит к импортам модулей. Не используйте спецификации из непроверенных источников.
+
+---
+---
+
+## Фабрика методов подбора гиперпараметров (`AutomationML.search`)
+
+Единый интерфейс для запуска `GridSearchCV`, `RandomizedSearchCV` и Optuna (`OptunaSearchCV` или ручной режим) по декларативному описанию пространства гиперпараметров. Используется единый DSL: категории задаются списками, числовые диапазоны — кортежами `("int"|"float", low, high, {opts})`, где `opts` поддерживает `step` (дискретизация) и `log=True` (лог-шкала для `float`). Это позволяет одной и той же спецификацией запускать разные поисковые стратегии без переписывания кода.
+
+### Ключевые идеи
+
+* **Единый DSL для всех методов**: один `param_space` работает в `grid`, `random`, `optuna`.
+* **Знакомый sklearn-API**: для `grid`/`random` возвращаются обычные `GridSearchCV`/`RandomizedSearchCV`; для `optuna` — `OptunaSearchCV` (если доступен) или ручной конфиг.
+* **Автогенерация objective**: в ручном Optuna-режиме функция цели генерируется автоматически (не нужно писать `objective` вручную).
+* **Строгая валидация**: проверка имён параметров конструктора с подсказками при опечатках.
+* **Ленивая интеграция**: опциональные зависимости (`optuna`, `scipy`) требуются только когда действительно нужны.
+
+---
+
+### Быстрый старт
+
+```python
+from AutomationML.search import SearchFactory
+
+factory = SearchFactory(random_state=42)
+```
+
+#### GridSearchCV (для диапазонов обязателен `step`)
+
+```python
+grid = factory.create(
+    method="grid",
+    estimator_path="sklearn.linear_model.LogisticRegression",
+    estimator_kwargs={"max_iter": 10_000},
+    param_space={
+        "C": ("float", 1e-3, 1e2, {"step": 1.0}),
+        "penalty": ["l2"],
+        "solver": ["lbfgs"],
+    },
+    cv=5, scoring="accuracy", n_jobs=-1,
+)
+grid.fit(X_train, y_train)
+best_model = grid.best_estimator_
+```
+
+#### RandomizedSearchCV (без `step` → распределения; с `step` → дискретные списки)
+
+```python
+rnd = factory.create(
+    method="random",
+    estimator_path="sklearn.ensemble.RandomForestClassifier",
+    param_space={
+        "n_estimators": ("int", 50, 200),
+        "max_depth": ("int", 3, 15),
+        "criterion": ["gini", "entropy"],
+    },
+    cv=5, scoring="accuracy", n_iter=20, n_jobs=-1,
+)
+rnd.fit(X_train, y_train)
+best_model = rnd.best_estimator_
+```
+
+#### Optuna (оба варианта: интеграция и ручной режим)
+
+```python
+opt = factory.create(
+    method="optuna",
+    estimator_path="sklearn.svm.SVC",
+    param_space={
+        "C": ("float", 1e-3, 1e3, {"log": True}),
+        "kernel": ["linear", "rbf"],
+        "gamma": ("float", 1e-4, 1.0, {"log": True}),
+    },
+    cv=5, scoring="accuracy", n_trials=40, n_jobs=-1,
+)
+
+# Если установлен optuna.integration.OptunaSearchCV — вернётся sklearn-совместимый объект:
+if hasattr(opt, "fit"):
+    opt.fit(X_train, y_train)
+    best_model = opt.best_estimator_
+
+# Иначе фабрика вернёт кортеж ("optuna-manual", cfg): запускаем ручной режим
+else:
+    from AutomationML.search import run_optuna_manual
+    mode, cfg = opt
+    study = run_optuna_manual(
+        estimator_class=cfg["estimator_class"],
+        grid=cfg["param_space"],
+        X_train=X_train, y_train=y_train,
+        scoring=cfg["scoring"], cv=cfg["cv"],
+        n_trials=cfg["n_trials"],
+        study_direction=cfg.get("study_direction", "maximize"),
+        sampler=cfg.get("sampler"), pruner=cfg.get("pruner"),
+        fit_params=cfg.get("fit_params"), fixed_params=cfg.get("fixed_params"),
+        timeout=cfg.get("timeout"), callbacks=cfg.get("callbacks"),
+    )
+    # финальная модель создаётся вручную лучшими параметрами:
+    from sklearn.svm import SVC
+    best_model = SVC(**study.best_trial.params).fit(X_train, y_train)
+```
+
+---
+
+### Единый DSL пространства гиперпараметров
+
+```python
+param_space = {
+  "criterion": ["gini", "entropy", "log_loss"],       # категории
+  "max_depth": ("int", 3, 30),                        # диапазон int (включительно)
+  "min_samples_leaf": ("int", 1, 20, {"step": 3}),    # дискретизация шагом 3
+  "alpha": ("float", 1e-4, 1.0, {"log": True}),       # лог-шкала (float)
+  # условные/произвольные параметры только для Optuna:
+  "leaf_size": lambda t: t.suggest_int("leaf_size", 10, 100, step=5),
+}
+```
+
+* **GridSearchCV**: для диапазонов обязателен `step`; иначе будет ошибка валидации.
+* **RandomizedSearchCV**: без `step` диапазоны превращаются в распределения (`scipy.stats`), с `step` — в дискретные списки.
+* **Optuna**: диапазоны и категории транслируются в `trial.suggest_*`, `callable` исполняются как есть.
+
+---
+
+### Ручная Optuna (классическая схема)
+
+Можно обойтись без `OptunaSearchCV` и без фабрики поиска:
+
+```python
+from AutomationML.search import gen_objective, run_optuna_manual
+from sklearn.linear_model import Ridge
+
+param_space = {"alpha": ("float", 1e-6, 1e-1, {"log": True})}
+
+# автоматическая генерация objective(trial) под заданный класс модели и DSL
+objective = gen_objective(
+    estimator_class=Ridge,
+    grid=param_space,
+    X_train=X_train, y_train=y_train,
+    scoring="neg_mean_squared_error",
+    cv=5,
+)
+
+import optuna
+study = optuna.create_study(direction="maximize")
+study.optimize(objective, n_trials=30)
+
+# то же в «одну строчку»:
+study = run_optuna_manual(
+    Ridge, param_space, X_train, y_train,
+    scoring="neg_mean_squared_error", cv=5, n_trials=30
+)
+```
+
+---
+
+### Возвращаемые объекты
+
+* `method="grid"` → `GridSearchCV` (`.fit()`, `.best_params_`, `.best_estimator_`).
+* `method="random"` → `RandomizedSearchCV` (аналогично).
+* `method="optuna"`:
+
+  * при наличии интеграции → `OptunaSearchCV` (sklearn-API);
+  * иначе → кортеж `("optuna-manual", cfg)`, который передаётся в `run_optuna_manual(...)` и возвращает `optuna.study.Study`.
+
+---
+
+### Примеры `param_space`
+
+**LogisticRegression**:
+
+```python
+param_space_lr = {
+    "penalty": ["l1", "l2", "elasticnet"],
+    "C": ("float", 1e-3, 1e2, {"log": True}),
+    "solver": ["liblinear", "lbfgs", "saga"],
+    "l1_ratio": ("float", 0.0, 1.0, {"step": 0.1}),  # используется при penalty="elasticnet"
+    "max_iter": [10_000],
+}
+```
+
+**RandomForestClassifier**:
+
+```python
+param_space_rf = {
+    "n_estimators": ("int", 50, 500),
+    "criterion": ["gini", "entropy"],
+    "max_depth": ("int", 5, 50),
+    "min_samples_split": ("int", 2, 20),
+    "min_samples_leaf": ("int", 1, 20),
+    "max_features": ("float", 0.1, 0.9),
+    "bootstrap": [True, False],
+    "oob_score": [True, False],
+    "ccp_alpha": ("float", 0.0, 0.02),
+}
+```
+
+---
+
+### Ошибки и диагностика
+
+* `UnknownSearchMethodError` — неизвестный метод (`method`).
+* `InvalidSearchSpaceError` — некорректный `param_space` для выбранного метода (например, диапазон без `step` в `grid` или `callable` в `random`).
+* `OptionalDependencyError` — отсутствуют опциональные зависимости:
+
+  * `optuna` — для методов `optuna`;
+  * `scipy` — для `random` с непрерывными диапазонами без `step`.
+
+---
+
+### Опциональные зависимости
+
+* **optuna** — для Optuna-методов (`OptunaSearchCV` и ручной режим).
+* **scipy** — для `RandomizedSearchCV`, если используются непрерывные диапазоны без `step`.
+* Основной рантайм остаётся `scikit-learn`; прочие extras не обязательны.
+
+---
+
+### Безопасность
+
+Пространства гиперпараметров могут содержать `callable` (только для Optuna). Не используйте такие спецификации из непроверённых источников. Импорты классов по строковым путям выполняются лениво и с проверками.
